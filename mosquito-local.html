@@ -431,8 +431,9 @@ const clockEl   = document.getElementById('clock');
 let stream = null;
 let running = false;
 let showDebug = false;
-let prevFrame = null;       // ImageData of previous frame (grayscale)
+let prevFrame = null;
 let rafId = null;
+let warmupFrames = 0;        // 丟棄前幾幀等相機穩定
 
 // Config
 let sensitivity = 5;        // 1-10
@@ -444,8 +445,11 @@ let alertTotal  = 0;
 let lastAlertTime = 0;
 
 // Tracker: active targets
-const targets = new Map();   // id -> {x,y,w,h,life,trail[]}
+// life 現在是「連續命中幀數」，需達到 MIN_CONFIRM 才顯示
+const targets = new Map();
 let nextId = 0;
+const MIN_CONFIRM = 3;       // 至少連續 N 幀才算真實目標
+const MAX_LIFE    = 6;       // 失蹤後最多保留幾幀
 
 // FPS
 let fpsFrames = 0;
@@ -510,6 +514,7 @@ function stopDetect() {
   ctxDebug.clearRect(0, 0, cvDebug.width, cvDebug.height);
   targets.clear();
   prevFrame = null;
+  warmupFrames = 0;
   sCurrent.textContent = '—';
   sCurrent.className = 'stat-val';
   sFps.textContent = '—';
@@ -547,21 +552,32 @@ function processFrame(ts) {
   const frame = octx.getImageData(0, 0, vw, vh);
   const gray = toGray(frame);
 
-  if (!prevFrame) {
-    prevFrame = gray;
-    return;
-  }
+  // 暖機：等相機自動曝光穩定後再開始
+  if (!prevFrame) { prevFrame = gray; return; }
+  if (warmupFrames < 20) { warmupFrames++; prevFrame = gray; log('► 相機暖機中，請稍候...'); return; }
+
+  // ── 全域亮度補償（排除自動曝光漂移）──
+  const brightnessDelta = globalBrightnessDelta(gray, prevFrame);
+  const adjustedGray = compensateBrightness(gray, brightnessDelta);
 
   // ── Frame differencing ──
-  const thresh = map(sensitivity, 1, 10, 40, 10);  // higher sens = lower threshold
-  const diffBlobs = frameDiff(gray, prevFrame, vw, vh, thresh);
-  prevFrame = gray;
+  // 最低閾值鎖在 20，避免感測器雜訊（手機雜訊通常 ±10~15）
+  const thresh = Math.max(20, map(sensitivity, 1, 10, 45, 18));
+  const diffBlobs = frameDiff(adjustedGray, prevFrame, vw, vh, thresh);
+  prevFrame = gray;  // 存原始幀
 
-  // ── Filter by size (mosquito-sized objects) ──
-  const maxSz = map(sensitivity, 1, 10, 60, 120);   // max blob px
+  // ── 多重過濾（排除雜訊點） ──
+  const maxSz = map(sensitivity, 1, 10, 50, 100);
+  const minArea = minSize * minSize * 0.5;  // 要求一定面積，不只尺寸
   const blobs = diffBlobs.filter(b => {
     const sz = Math.max(b.w, b.h);
-    return sz >= minSize && sz <= maxSz && b.area >= minSize * minSize * 0.3;
+    if (sz < minSize || sz > maxSz) return false;
+    if (b.area < minArea) return false;                 // 面積不足 → 雜訊
+    const aspect = b.w / b.h;
+    if (aspect > 5 || aspect < 0.2) return false;      // 過細長 → 壓縮偽影
+    const density = b.area / (b.w * b.h);
+    if (density < 0.25) return false;                   // 密度太低 → 散亂雜訊
+    return true;
   });
 
   // ── Update tracker ──
@@ -576,12 +592,12 @@ function processFrame(ts) {
   // Debug view
   if (showDebug) drawDebugDiff(gray, prevFrame, vw, vh, thresh);
 
-  // ── Stats ──
-  const liveCount = targets.size;
-  sCurrent.textContent = liveCount || '—';
-  sCurrent.className = 'stat-val' + (liveCount > 0 ? ' danger' : '');
+  // ── Stats：只計算已確認目標（連續命中 >= MIN_CONFIRM） ──
+  const confirmedCount = [...targets.values()].filter(t => t.confirmed).length;
+  sCurrent.textContent = confirmedCount || '—';
+  sCurrent.className = 'stat-val' + (confirmedCount > 0 ? ' danger' : '');
 
-  if (liveCount > 0) {
+  if (confirmedCount > 0) {
     const now = Date.now();
     if (now - lastAlertTime > 1500) {
       lastAlertTime = now;
@@ -590,7 +606,7 @@ function processFrame(ts) {
       sAlert.textContent = alertTotal;
       sDetect.textContent = detectTotal;
       flashAlert();
-      log(`▲ 偵測到飛行物 ×${liveCount} · 尺寸吻合蚊子特徵`);
+      log(`▲ 偵測到飛行物 ×${confirmedCount} · 尺寸吻合蚊子特徵`);
     }
   }
 }
@@ -680,17 +696,37 @@ function connectedComponents(mask, w, h) {
   return blobs;
 }
 
+// ── 全域亮度補償（排除自動曝光）──
+function globalBrightnessDelta(curr, prev) {
+  // 取畫面中央 1/4 區域做平均，避免邊緣干擾
+  let sum = 0, count = 0;
+  // 直接抽樣每 16 個像素
+  for (let i = 0; i < curr.length; i += 16) {
+    sum += curr[i] - prev[i];
+    count++;
+  }
+  return (sum / count) | 0;
+}
+
+function compensateBrightness(gray, delta) {
+  if (Math.abs(delta) < 3) return gray; // 差異很小就不補償
+  const out = new Uint8Array(gray.length);
+  for (let i = 0; i < gray.length; i++) {
+    out[i] = Math.max(0, Math.min(255, gray[i] - delta));
+  }
+  return out;
+}
+
 // ── Tracker: match blobs to existing targets ──
 function updateTracker(blobs, vw, vh) {
   const matchDist = map(sensitivity, 1, 10, 80, 40);
 
-  // Decay existing targets
+  // 所有現有目標先標記為「本幀未命中」
   for (const [id, t] of targets) {
-    t.life--;
-    if (t.life <= 0) targets.delete(id);
+    t.hitThisFrame = false;
   }
 
-  // Match blobs to nearest target
+  // 嘗試將每個 blob 匹配到最近目標
   for (const b of blobs) {
     let bestId = null, bestDist = matchDist;
     for (const [id, t] of targets) {
@@ -702,17 +738,34 @@ function updateTracker(blobs, vw, vh) {
       const t = targets.get(bestId);
       t.cx = b.cx; t.cy = b.cy;
       t.x = b.x; t.y = b.y; t.w = b.w; t.h = b.h;
-      t.life = 8;
-      t.trail.push({x: b.cx, y: b.cy});
-      if (t.trail.length > 20) t.trail.shift();
+      t.missCount = 0;
+      t.hitCount = Math.min(t.hitCount + 1, MIN_CONFIRM + 2);
+      t.confirmed = t.hitCount >= MIN_CONFIRM;
+      t.hitThisFrame = true;
+      if (t.confirmed) {
+        t.trail.push({x: b.cx, y: b.cy});
+        if (t.trail.length > 20) t.trail.shift();
+      }
     } else {
+      // 新目標，從 hitCount=1 開始（需累積到 MIN_CONFIRM 才顯示）
       targets.set(nextId++, {
         cx: b.cx, cy: b.cy,
         x: b.x, y: b.y, w: b.w, h: b.h,
-        life: 8,
-        trail: [{x: b.cx, y: b.cy}],
+        hitCount: 1,
+        missCount: 0,
+        confirmed: false,
+        hitThisFrame: true,
+        trail: [],
         born: Date.now()
       });
+    }
+  }
+
+  // 未命中的目標：增加 missCount，超過上限則刪除
+  for (const [id, t] of targets) {
+    if (!t.hitThisFrame) {
+      t.missCount++;
+      if (t.missCount > MAX_LIFE) targets.delete(id);
     }
   }
 }
@@ -721,8 +774,10 @@ function updateTracker(blobs, vw, vh) {
 function drawTargets(sx, sy) {
   const now = Date.now();
   for (const [id, t] of targets) {
-    const alpha = t.life / 8;
-    const age = (now - t.born) / 1000;
+    // 只繪製已確認目標
+    if (!t.confirmed) continue;
+
+    const alpha = Math.max(0.3, 1 - t.missCount / MAX_LIFE);
 
     // Trail
     if (t.trail.length > 1) {
@@ -768,6 +823,7 @@ function drawTargets(sx, sy) {
 
     // Label
     ctxMain.shadowBlur = 0;
+    const age = (now - t.born) / 1000;
     const label = age < 0.5 ? 'NEW' : 'TARGET';
     ctxMain.fillStyle = `rgba(255,60,60,${alpha * 0.85})`;
     ctxMain.fillRect(bx - pad, by - pad - 14, 52, 14);
