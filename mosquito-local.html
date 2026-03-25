@@ -1,0 +1,833 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>蚊子雷達 · 本地端</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Noto+Sans+TC:wght@300;400;700&display=swap');
+
+:root {
+  --bg: #04080c;
+  --amber: #ffb300;
+  --amber-dim: #ffb30022;
+  --amber-glow: 0 0 16px #ffb30066;
+  --red: #ff3c3c;
+  --green: #39ff14;
+  --panel: #090d10;
+  --border: #ffb30020;
+  --text: #ffb300;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  background: var(--bg);
+  color: var(--amber);
+  font-family: 'Share Tech Mono', monospace;
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  user-select: none;
+}
+
+/* CRT noise */
+body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.04'/%3E%3C/svg%3E");
+  pointer-events: none;
+  z-index: 200;
+  opacity: 0.6;
+}
+
+/* Scanlines */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background: repeating-linear-gradient(0deg, transparent, transparent 3px, rgba(0,0,0,0.15) 3px, rgba(0,0,0,0.15) 4px);
+  pointer-events: none;
+  z-index: 199;
+}
+
+/* ── HEADER ── */
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.logo-text {
+  font-size: 11px;
+  letter-spacing: 4px;
+  text-transform: uppercase;
+  color: var(--amber);
+  text-shadow: var(--amber-glow);
+  line-height: 1.6;
+}
+
+.logo-text small {
+  display: block;
+  font-size: 8px;
+  letter-spacing: 3px;
+  opacity: 0.45;
+}
+
+.sys-clock {
+  font-size: 10px;
+  letter-spacing: 2px;
+  opacity: 0.6;
+  text-align: right;
+}
+
+/* ── CAMERA ── */
+.cam-wrap {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #000;
+  min-height: 0;
+}
+
+#video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+/* Overlay canvases */
+#cvMain {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 5;
+}
+
+#cvDebug {
+  position: absolute;
+  top: 8px; right: 8px;
+  width: 120px;
+  height: 90px;
+  border: 1px solid var(--amber-dim);
+  z-index: 6;
+  opacity: 0.7;
+  display: none;
+}
+
+/* Corners */
+.frame-corner {
+  position: absolute;
+  width: 22px;
+  height: 22px;
+  border-color: var(--amber);
+  border-style: solid;
+  z-index: 7;
+  opacity: 0.7;
+  box-shadow: var(--amber-glow);
+}
+.fc-tl { top: 10px; left: 10px; border-width: 1px 0 0 1px; }
+.fc-tr { top: 10px; right: 10px; border-width: 1px 1px 0 0; }
+.fc-bl { bottom: 10px; left: 10px; border-width: 0 0 1px 1px; }
+.fc-br { bottom: 10px; right: 10px; border-width: 0 1px 1px 0; }
+
+/* Center reticle */
+.reticle {
+  position: absolute;
+  width: 60px; height: 60px;
+  top: 50%; left: 50%;
+  transform: translate(-50%,-50%);
+  z-index: 7;
+  pointer-events: none;
+  animation: reticle-spin 8s linear infinite;
+}
+@keyframes reticle-spin {
+  to { transform: translate(-50%,-50%) rotate(360deg); }
+}
+
+.reticle::before, .reticle::after {
+  content: '';
+  position: absolute;
+  border-radius: 50%;
+}
+.reticle::before {
+  inset: 0;
+  border: 1px solid rgba(255,179,0,0.2);
+}
+.reticle::after {
+  inset: 20px;
+  border: 1px solid rgba(255,179,0,0.3);
+}
+
+/* Alert overlay */
+#alertOverlay {
+  position: absolute;
+  inset: 0;
+  background: rgba(255,60,60,0.18);
+  z-index: 8;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.1s;
+}
+
+/* No-cam msg */
+.no-cam-msg {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  color: var(--amber);
+  font-size: 12px;
+  letter-spacing: 2px;
+  opacity: 0.4;
+  z-index: 10;
+}
+
+/* ── BOTTOM PANEL ── */
+.panel {
+  background: var(--panel);
+  border-top: 1px solid var(--border);
+  padding: 10px 14px 14px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* Stats grid */
+.stats {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 6px;
+}
+
+.stat {
+  background: rgba(255,179,0,0.04);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 6px 8px;
+  text-align: center;
+}
+
+.stat-lbl {
+  font-size: 7px;
+  letter-spacing: 1.5px;
+  opacity: 0.4;
+  text-transform: uppercase;
+  margin-bottom: 3px;
+}
+
+.stat-val {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--amber);
+  text-shadow: var(--amber-glow);
+  line-height: 1;
+  transition: color 0.2s;
+}
+.stat-val.danger { color: var(--red); text-shadow: 0 0 16px var(--red); }
+.stat-val.ok { color: var(--green); text-shadow: 0 0 16px var(--green); }
+
+/* Log ticker */
+.log-bar {
+  font-size: 10px;
+  letter-spacing: 1px;
+  opacity: 0.6;
+  height: 16px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* Sensitivity slider */
+.controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.ctrl-lbl {
+  font-size: 9px;
+  letter-spacing: 2px;
+  opacity: 0.5;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+input[type=range] {
+  flex: 1;
+  -webkit-appearance: none;
+  height: 2px;
+  background: var(--amber-dim);
+  border-radius: 1px;
+  outline: none;
+}
+input[type=range]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 14px; height: 14px;
+  border-radius: 50%;
+  background: var(--amber);
+  box-shadow: var(--amber-glow);
+  cursor: pointer;
+}
+
+.ctrl-val {
+  font-size: 11px;
+  width: 28px;
+  text-align: right;
+  flex-shrink: 0;
+}
+
+/* Button */
+.btn {
+  width: 100%;
+  padding: 12px;
+  background: transparent;
+  border: 1px solid var(--amber);
+  color: var(--amber);
+  font-family: 'Share Tech Mono', monospace;
+  font-size: 11px;
+  letter-spacing: 4px;
+  text-transform: uppercase;
+  border-radius: 3px;
+  cursor: pointer;
+  box-shadow: var(--amber-glow);
+  transition: all 0.15s;
+  position: relative;
+  overflow: hidden;
+}
+.btn::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: var(--amber);
+  transform: scaleX(0);
+  transform-origin: left;
+  transition: transform 0.15s;
+  z-index: -1;
+}
+.btn:active::before, .btn.stop::before { transform: scaleX(1); }
+.btn:active, .btn.stop { color: var(--bg); }
+
+/* Debug toggle */
+.debug-toggle {
+  position: absolute;
+  top: 10px; left: 10px;
+  z-index: 20;
+  background: rgba(0,0,0,0.6);
+  border: 1px solid var(--border);
+  color: var(--amber);
+  font-family: 'Share Tech Mono', monospace;
+  font-size: 8px;
+  letter-spacing: 1px;
+  padding: 4px 8px;
+  border-radius: 2px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+.cam-wrap:hover .debug-toggle { opacity: 1; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo-text">
+    MosquitoRadar
+    <small>本地端視覺偵測系統</small>
+  </div>
+  <div class="sys-clock" id="clock">--:--:--<br>LOCAL MODE</div>
+</header>
+
+<div class="cam-wrap" id="camWrap">
+  <video id="video" autoplay playsinline muted></video>
+  <canvas id="cvMain"></canvas>
+  <canvas id="cvDebug"></canvas>
+
+  <div class="frame-corner fc-tl"></div>
+  <div class="frame-corner fc-tr"></div>
+  <div class="frame-corner fc-bl"></div>
+  <div class="frame-corner fc-br"></div>
+  <div class="reticle"></div>
+  <div id="alertOverlay"></div>
+
+  <button class="debug-toggle" id="debugBtn" onclick="toggleDebug()">差分圖</button>
+
+  <div class="no-cam-msg" id="noCamMsg">
+    <span style="font-size:32px; opacity:0.3">◉</span>
+    <span>點擊下方開始偵測</span>
+  </div>
+</div>
+
+<div class="panel">
+  <div class="stats">
+    <div class="stat">
+      <div class="stat-lbl">已偵測</div>
+      <div class="stat-val" id="sDetect">0</div>
+    </div>
+    <div class="stat">
+      <div class="stat-lbl">當前目標</div>
+      <div class="stat-val" id="sCurrent">—</div>
+    </div>
+    <div class="stat">
+      <div class="stat-lbl">警報次數</div>
+      <div class="stat-val" id="sAlert">0</div>
+    </div>
+    <div class="stat">
+      <div class="stat-lbl">FPS</div>
+      <div class="stat-val" id="sFps">—</div>
+    </div>
+  </div>
+
+  <div class="log-bar" id="logBar">► 系統待機中</div>
+
+  <div class="controls">
+    <span class="ctrl-lbl">靈敏度</span>
+    <input type="range" id="sensitivity" min="1" max="10" value="5" oninput="updateSens(this.value)">
+    <span class="ctrl-val" id="sensVal">5</span>
+  </div>
+
+  <div class="controls">
+    <span class="ctrl-lbl">最小尺寸</span>
+    <input type="range" id="minSize" min="1" max="20" value="4" oninput="updateMin(this.value)">
+    <span class="ctrl-val" id="minVal">4px</span>
+  </div>
+
+  <button class="btn" id="btnMain" onclick="toggleDetect()">▶ 開啟偵測</button>
+</div>
+
+<script>
+// ── Elements ──
+const video     = document.getElementById('video');
+const cvMain    = document.getElementById('cvMain');
+const cvDebug   = document.getElementById('cvDebug');
+const ctxMain   = cvMain.getContext('2d');
+const ctxDebug  = cvDebug.getContext('2d');
+const noCamMsg  = document.getElementById('noCamMsg');
+const alertOvl  = document.getElementById('alertOverlay');
+const sDetect   = document.getElementById('sDetect');
+const sCurrent  = document.getElementById('sCurrent');
+const sAlert    = document.getElementById('sAlert');
+const sFps      = document.getElementById('sFps');
+const logBar    = document.getElementById('logBar');
+const btnMain   = document.getElementById('btnMain');
+const clockEl   = document.getElementById('clock');
+
+// ── State ──
+let stream = null;
+let running = false;
+let showDebug = false;
+let prevFrame = null;       // ImageData of previous frame (grayscale)
+let rafId = null;
+
+// Config
+let sensitivity = 5;        // 1-10
+let minSize = 4;            // px
+
+// Stats
+let detectTotal = 0;
+let alertTotal  = 0;
+let lastAlertTime = 0;
+
+// Tracker: active targets
+const targets = new Map();   // id -> {x,y,w,h,life,trail[]}
+let nextId = 0;
+
+// FPS
+let fpsFrames = 0;
+let fpsTime = performance.now();
+
+// ── Clock ──
+setInterval(() => {
+  const d = new Date();
+  const t = d.toTimeString().slice(0,8);
+  clockEl.innerHTML = t + '<br>LOCAL MODE';
+}, 1000);
+
+// ── Controls ──
+function updateSens(v) {
+  sensitivity = +v;
+  document.getElementById('sensVal').textContent = v;
+}
+function updateMin(v) {
+  minSize = +v;
+  document.getElementById('minVal').textContent = v + 'px';
+}
+function toggleDebug() {
+  showDebug = !showDebug;
+  cvDebug.style.display = showDebug ? 'block' : 'none';
+  document.getElementById('debugBtn').textContent = showDebug ? '隱藏差分' : '差分圖';
+}
+
+// ── Main toggle ──
+async function toggleDetect() {
+  if (running) return stopDetect();
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } },
+      audio: false
+    });
+    video.srcObject = stream;
+    video.onloadedmetadata = () => {
+      video.play();
+      noCamMsg.style.display = 'none';
+      running = true;
+      btnMain.textContent = '■ 停止偵測';
+      btnMain.classList.add('stop');
+      sizeCanvases();
+      prevFrame = null;
+      log('► 偵測啟動 · 等待畫面穩定...');
+      rafId = requestAnimationFrame(processFrame);
+    };
+  } catch(e) {
+    log('✕ 相機存取失敗 — 請允許相機權限');
+  }
+}
+
+function stopDetect() {
+  running = false;
+  if (stream) stream.getTracks().forEach(t => t.stop());
+  cancelAnimationFrame(rafId);
+  stream = null;
+  noCamMsg.style.display = 'flex';
+  btnMain.textContent = '▶ 開啟偵測';
+  btnMain.classList.remove('stop');
+  ctxMain.clearRect(0, 0, cvMain.width, cvMain.height);
+  ctxDebug.clearRect(0, 0, cvDebug.width, cvDebug.height);
+  targets.clear();
+  prevFrame = null;
+  sCurrent.textContent = '—';
+  sCurrent.className = 'stat-val';
+  sFps.textContent = '—';
+  log('■ 偵測停止');
+}
+
+function sizeCanvases() {
+  const w = video.videoWidth  || video.offsetWidth;
+  const h = video.videoHeight || video.offsetHeight;
+  cvMain.width = w; cvMain.height = h;
+  cvDebug.width = 120; cvDebug.height = 90;
+}
+
+// ── Core Processing Loop ──
+function processFrame(ts) {
+  if (!running) return;
+  rafId = requestAnimationFrame(processFrame);
+
+  // FPS
+  fpsFrames++;
+  if (ts - fpsTime >= 1000) {
+    sFps.textContent = fpsFrames;
+    fpsFrames = 0;
+    fpsTime = ts;
+  }
+
+  const vw = video.videoWidth;
+  const vh = video.videoHeight;
+  if (!vw || !vh) return;
+
+  // ── Grab grayscale frame ──
+  const offscreen = new OffscreenCanvas(vw, vh);
+  const octx = offscreen.getContext('2d');
+  octx.drawImage(video, 0, 0, vw, vh);
+  const frame = octx.getImageData(0, 0, vw, vh);
+  const gray = toGray(frame);
+
+  if (!prevFrame) {
+    prevFrame = gray;
+    return;
+  }
+
+  // ── Frame differencing ──
+  const thresh = map(sensitivity, 1, 10, 40, 10);  // higher sens = lower threshold
+  const diffBlobs = frameDiff(gray, prevFrame, vw, vh, thresh);
+  prevFrame = gray;
+
+  // ── Filter by size (mosquito-sized objects) ──
+  const maxSz = map(sensitivity, 1, 10, 60, 120);   // max blob px
+  const blobs = diffBlobs.filter(b => {
+    const sz = Math.max(b.w, b.h);
+    return sz >= minSize && sz <= maxSz && b.area >= minSize * minSize * 0.3;
+  });
+
+  // ── Update tracker ──
+  updateTracker(blobs, vw, vh);
+
+  // ── Draw overlays ──
+  ctxMain.clearRect(0, 0, cvMain.width, cvMain.height);
+  const scaleX = cvMain.width  / vw;
+  const scaleY = cvMain.height / vh;
+  drawTargets(scaleX, scaleY);
+
+  // Debug view
+  if (showDebug) drawDebugDiff(gray, prevFrame, vw, vh, thresh);
+
+  // ── Stats ──
+  const liveCount = targets.size;
+  sCurrent.textContent = liveCount || '—';
+  sCurrent.className = 'stat-val' + (liveCount > 0 ? ' danger' : '');
+
+  if (liveCount > 0) {
+    const now = Date.now();
+    if (now - lastAlertTime > 1500) {
+      lastAlertTime = now;
+      alertTotal++;
+      detectTotal++;
+      sAlert.textContent = alertTotal;
+      sDetect.textContent = detectTotal;
+      flashAlert();
+      log(`▲ 偵測到飛行物 ×${liveCount} · 尺寸吻合蚊子特徵`);
+    }
+  }
+}
+
+// ── Grayscale conversion ──
+function toGray(imgData) {
+  const d = imgData.data;
+  const gray = new Uint8Array(imgData.width * imgData.height);
+  for (let i = 0; i < gray.length; i++) {
+    const p = i * 4;
+    gray[i] = (d[p] * 77 + d[p+1] * 150 + d[p+2] * 29) >> 8;
+  }
+  return gray;
+}
+
+// ── Frame differencing + simple blob detection ──
+function frameDiff(curr, prev, w, h, thresh) {
+  // Build diff mask
+  const mask = new Uint8Array(w * h);
+  for (let i = 0; i < mask.length; i++) {
+    mask[i] = Math.abs(curr[i] - prev[i]) > thresh ? 255 : 0;
+  }
+
+  // Morphological dilation (3x3) to connect nearby pixels
+  const dilated = dilate(mask, w, h, 2);
+
+  // Connected components (simple flood fill)
+  return connectedComponents(dilated, w, h);
+}
+
+function dilate(mask, w, h, r) {
+  const out = new Uint8Array(mask.length);
+  for (let y = r; y < h - r; y++) {
+    for (let x = r; x < w - r; x++) {
+      let found = false;
+      outer: for (let dy = -r; dy <= r; dy++) {
+        for (let dx = -r; dx <= r; dx++) {
+          if (mask[(y+dy)*w + (x+dx)]) { found = true; break outer; }
+        }
+      }
+      if (found) out[y*w+x] = 255;
+    }
+  }
+  return out;
+}
+
+function connectedComponents(mask, w, h) {
+  const visited = new Uint8Array(mask.length);
+  const blobs = [];
+
+  for (let y = 1; y < h-1; y++) {
+    for (let x = 1; x < w-1; x++) {
+      const idx = y*w+x;
+      if (!mask[idx] || visited[idx]) continue;
+
+      // BFS
+      const queue = [idx];
+      visited[idx] = 1;
+      let minX=x, maxX=x, minY=y, maxY=y, area=0;
+
+      while (queue.length) {
+        const cur = queue.pop();
+        const cx = cur % w, cy = (cur/w)|0;
+        area++;
+        if (cx < minX) minX=cx; if (cx > maxX) maxX=cx;
+        if (cy < minY) minY=cy; if (cy > maxY) maxY=cy;
+
+        const neighbors = [cur-1, cur+1, cur-w, cur+w];
+        for (const n of neighbors) {
+          if (n >= 0 && n < mask.length && mask[n] && !visited[n]) {
+            visited[n] = 1;
+            queue.push(n);
+          }
+        }
+      }
+
+      blobs.push({
+        x: minX, y: minY,
+        w: maxX - minX + 1,
+        h: maxY - minY + 1,
+        cx: (minX+maxX)/2,
+        cy: (minY+maxY)/2,
+        area
+      });
+    }
+  }
+  return blobs;
+}
+
+// ── Tracker: match blobs to existing targets ──
+function updateTracker(blobs, vw, vh) {
+  const matchDist = map(sensitivity, 1, 10, 80, 40);
+
+  // Decay existing targets
+  for (const [id, t] of targets) {
+    t.life--;
+    if (t.life <= 0) targets.delete(id);
+  }
+
+  // Match blobs to nearest target
+  for (const b of blobs) {
+    let bestId = null, bestDist = matchDist;
+    for (const [id, t] of targets) {
+      const d = Math.hypot(b.cx - t.cx, b.cy - t.cy);
+      if (d < bestDist) { bestDist = d; bestId = id; }
+    }
+
+    if (bestId !== null) {
+      const t = targets.get(bestId);
+      t.cx = b.cx; t.cy = b.cy;
+      t.x = b.x; t.y = b.y; t.w = b.w; t.h = b.h;
+      t.life = 8;
+      t.trail.push({x: b.cx, y: b.cy});
+      if (t.trail.length > 20) t.trail.shift();
+    } else {
+      targets.set(nextId++, {
+        cx: b.cx, cy: b.cy,
+        x: b.x, y: b.y, w: b.w, h: b.h,
+        life: 8,
+        trail: [{x: b.cx, y: b.cy}],
+        born: Date.now()
+      });
+    }
+  }
+}
+
+// ── Draw tracked targets ──
+function drawTargets(sx, sy) {
+  const now = Date.now();
+  for (const [id, t] of targets) {
+    const alpha = t.life / 8;
+    const age = (now - t.born) / 1000;
+
+    // Trail
+    if (t.trail.length > 1) {
+      ctxMain.beginPath();
+      ctxMain.moveTo(t.trail[0].x * sx, t.trail[0].y * sy);
+      for (let i = 1; i < t.trail.length; i++) {
+        ctxMain.lineTo(t.trail[i].x * sx, t.trail[i].y * sy);
+      }
+      ctxMain.strokeStyle = `rgba(255,60,60,${alpha * 0.5})`;
+      ctxMain.lineWidth = 1.5;
+      ctxMain.shadowColor = 'rgba(255,60,60,0.6)';
+      ctxMain.shadowBlur = 6;
+      ctxMain.stroke();
+    }
+
+    // Bounding box
+    const bx = t.x * sx, by = t.y * sy;
+    const bw = t.w * sx, bh = t.h * sy;
+    const pad = 6;
+
+    ctxMain.strokeStyle = `rgba(255,60,60,${alpha})`;
+    ctxMain.lineWidth = 1.5;
+    ctxMain.shadowColor = `rgba(255,60,60,${alpha})`;
+    ctxMain.shadowBlur = 8;
+    ctxMain.strokeRect(bx - pad, by - pad, bw + pad*2, bh + pad*2);
+
+    // Corner ticks
+    const tk = 8;
+    ctxMain.strokeStyle = `rgba(255,200,0,${alpha})`;
+    ctxMain.shadowColor = `rgba(255,200,0,${alpha})`;
+    const corners = [
+      [bx-pad, by-pad, 1, 1],
+      [bx-pad+bw+pad*2, by-pad, -1, 1],
+      [bx-pad, by-pad+bh+pad*2, 1, -1],
+      [bx-pad+bw+pad*2, by-pad+bh+pad*2, -1, -1],
+    ];
+    corners.forEach(([cx,cy,dx,dy]) => {
+      ctxMain.beginPath();
+      ctxMain.moveTo(cx,cy); ctxMain.lineTo(cx+dx*tk,cy);
+      ctxMain.moveTo(cx,cy); ctxMain.lineTo(cx,cy+dy*tk);
+      ctxMain.stroke();
+    });
+
+    // Label
+    ctxMain.shadowBlur = 0;
+    const label = age < 0.5 ? 'NEW' : 'TARGET';
+    ctxMain.fillStyle = `rgba(255,60,60,${alpha * 0.85})`;
+    ctxMain.fillRect(bx - pad, by - pad - 14, 52, 14);
+    ctxMain.fillStyle = `rgba(255,255,255,${alpha})`;
+    ctxMain.font = '9px "Share Tech Mono", monospace';
+    ctxMain.fillText(`#${id%100} ${label}`, bx - pad + 3, by - pad - 3);
+
+    // Center dot
+    const ccx = (t.x + t.w/2) * sx;
+    const ccy = (t.y + t.h/2) * sy;
+    ctxMain.beginPath();
+    ctxMain.arc(ccx, ccy, 3, 0, Math.PI*2);
+    ctxMain.fillStyle = `rgba(255,60,60,${alpha})`;
+    ctxMain.shadowColor = 'rgba(255,60,60,0.8)';
+    ctxMain.shadowBlur = 8;
+    ctxMain.fill();
+    ctxMain.shadowBlur = 0;
+  }
+}
+
+// ── Debug: show diff as small thumbnail ──
+function drawDebugDiff(curr, prev, w, h, thresh) {
+  const dw = 120, dh = 90;
+  const imgData = ctxDebug.createImageData(dw, dh);
+  const sw = w/dw, sh = h/dh;
+  for (let y = 0; y < dh; y++) {
+    for (let x = 0; x < dw; x++) {
+      const si = ((y*sh|0)*w + (x*sw|0));
+      const diff = Math.abs(curr[si] - prev[si]);
+      const v = diff > thresh ? 255 : diff * 2;
+      const p = (y*dw+x)*4;
+      imgData.data[p]   = v > thresh ? 255 : 0;
+      imgData.data[p+1] = 0;
+      imgData.data[p+2] = v > thresh ? 0 : v;
+      imgData.data[p+3] = 200;
+    }
+  }
+  ctxDebug.putImageData(imgData, 0, 0);
+}
+
+// ── Alert flash ──
+function flashAlert() {
+  alertOvl.style.opacity = '1';
+  setTimeout(() => alertOvl.style.opacity = '0', 200);
+}
+
+// ── Log ──
+function log(msg) {
+  logBar.textContent = msg;
+}
+
+// ── Utility ──
+function map(v, a, b, c, d) {
+  return c + (d-c) * (v-a) / (b-a);
+}
+
+// Resize canvases on orientation change
+window.addEventListener('resize', () => {
+  if (running) sizeCanvases();
+});
+</script>
+</body>
+</html>
